@@ -167,10 +167,10 @@ Note that `cv_tracker.py` uses macOS's `AVFoundation` camera backend. On Windows
 Both scripts take folder paths as arguments. Since the folder names have spaces, keep the quotes.
 
 ```bash
-# 1. Merge each IMU/CV pair, filter, integrate, align, and compute errors
+# Merge each IMU/CV pair, filter, integrate, align, and compute errors
 python3 "Software/Data Processing Scripts/process_and_merge.py" "Data/Raw Data" "Data/Processed Data"
 
-# 2. Build Tables 1–2, summary statistics, and Figures 2–4
+# Build Tables 1–2, summary statistics, and Figures 2–4
 python3 "Software/Data Processing Scripts/generate_paper_figures.py" "Data/Processed Data"
 ```
 
@@ -257,12 +257,6 @@ Based on what went wrong with the IMU, we think the most useful next steps are:
 1. **Automatic ZUPT:** detect when the car is at rest (low acceleration variance and low angular velocity) and clamp velocity to zero, so drift stops after the car does.
 2. **Extended Kalman Filter (EKF) sensor fusion:** use the fast 122 Hz IMU between video frames and let the 30 FPS camera correct the drift.
 3. **Multiple markers:** put several ArUco tags on the chassis to help when the marker looks small or is seen at a steep angle.
-
-## Citation
-
-If you use this code or data, please cite the paper:
-
-> *Investigation of the efficacy of smartphone-camera-based computer vision for 1-dimensional position tracking versus traditional inertial measurement units.*
 
 ## AI Use
 
