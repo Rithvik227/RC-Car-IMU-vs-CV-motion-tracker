@@ -1,0 +1,51 @@
+{
+  "N": 11,
+  "cv_dev_pct_mean": 5.1298184423288395,
+  "cv_dev_pct_sd": 5.714473357477197,
+  "cv_dev_pct_median": 2.2752530330127625,
+  "cv_dev_pct_by_block": {
+    "0.75": 6.31,
+    "1.0": 2.77,
+    "1.5": 5.71
+  },
+  "cv_dev_pct_mean_excl_004": 3.6881041415205447,
+  "cv_travel_sd_by_block_cm": {
+    "0.75": 7.37,
+    "1.0": 3.08,
+    "1.5": 8.45
+  },
+  "imu_err_pct_mean": 45.91427434826284,
+  "imu_err_pct_sd": 33.96614198737901,
+  "imu_err_pct_median": 36.73988080448453,
+  "imu_err_pct_by_block": {
+    "0.75": 41.89,
+    "1.0": 72.13,
+    "1.5": 30.28
+  },
+  "imu_err_pct_min": 5.954210836561205,
+  "imu_err_pct_max": 104.5021106707615,
+  "n_imu_err_over_50pct": 5,
+  "imu_vs_target_pct_mean": 49.98101407318152,
+  "imu_vs_target_pct_sd": 39.196799543002676,
+  "imu_worse_than_cv_count": 11,
+  "sign_test_p": 0.0009765625,
+  "sign_test_vs_target_p": 0.0009765625,
+  "wilcoxon_p": 0.0009765625,
+  "regression_slope": 0.08820573262701853,
+  "regression_intercept": 0.39446159453046753,
+  "regression_r": 0.08840584376659175,
+  "regression_p": 0.7960384814845426,
+  "final_err_min_m": 0.044542767211029,
+  "final_err_max_m": 1.0515042861621806,
+  "peak_err_max_m": 1.0515042861621806,
+  "mae_by_block": {
+    "0.75": 0.077,
+    "1.0": 0.178,
+    "1.5": 0.155
+  },
+  "rmse_by_block": {
+    "0.75": 0.135,
+    "1.0": 0.295,
+    "1.5": 0.237
+  }
+}

@@ -1,222 +1,166 @@
+"""Merge onboard IMU telemetry with smartphone CV tracking and compute error metrics.
+
+Corrected version (Oct 26, 2026). Changes from the original script:
+  - IMU and CV files are paired by their shared laptop-clock start timestamp, not by file number
+    (imu_run_001 pairs with cv_data_002 and imu_run_002 with cv_data_001).
+  - Run 006 is excluded: imu_run_006 and cv_data_006 were recorded 48 min apart and no matching
+    file for either exists.
+  - Only ArUco Tag ID 0 is used; detections of other tag IDs are discarded and the EMA filter is
+    re-applied offline to Tag 0 rows only.
+  - CV and IMU are aligned on the synchronized Unix timestamps (ESP32 clock set from the host at START)
+    instead of by matching motion-onset thresholds.
+  - Integration uses the trapezoidal rule.
+  - The IMU sign is taken from the acceleration at motion onset (no trial required inversion).
+  - The Run 004 hard-coded override is removed; every CV value is the camera's own measurement.
+  - The constant -0.004 m term is dropped because it cancels when the start position is zeroed.
+"""
 import sys
-import glob
 import os
-import re
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, correlate
+from scipy.integrate import cumulative_trapezoid
 
-def shift_array(arr, lag):
-    n = len(arr)
-    shifted = np.empty_like(arr)
-    if lag > 0:
-        shifted[:lag] = arr[0]
-        shifted[lag:] = arr[:n - lag]
-    elif lag < 0:
-        shifted[:n + lag] = arr[-lag:]
-        shifted[n + lag:] = arr[-1]
-    else:
-        shifted[:] = arr
-    return shifted
+# trial -> (imu file id, cv file id); paired by matching start timestamps
+PAIRS = {
+    "001": ("001", "002"), "002": ("002", "001"), "003": ("003", "003"), "004": ("004", "004"),
+    "005": ("005", "005"), "007": ("007", "007"), "008": ("008", "008"),
+    "009": ("009", "009"), "010": ("010", "010"), "011": ("011", "011"), "012": ("012", "012"),
+}
+EXCLUDED = {"006": "imu_run_006 and cv_data_006 start 2901 s apart; no matching files"}
 
-def process_single_pair(imu_path, cv_path):
-    trial_id = imu_path.split("_")[-1].split(".")[0]
-    output_path = f"research_telemetry_merged_{trial_id}.csv"
+CV_SCALE = 1.20          # 120 mm printed marker / 100 mm marker size assumed by cv_tracker.py
+ALPHA_POS = 0.7          # EMA weight used by cv_tracker.py
+MEDIAN_WIN = 15          # centered rolling median (frames)
+LPF_CUTOFF_HZ = 10.0     # 2nd-order Butterworth, zero phase
+STATIONARY_SEC = 1.5     # bias window and velocity clamp
+ONSET_ACC = 0.20         # m/s^2, onset threshold (5 consecutive samples)
+MAX_LAG_SEC = 0.5        # cross-correlation search window
 
-    print(f"\nprocessing imu telemetry: {imu_path}")
-    print(f"processing cv ground truth: {cv_path}")
 
+def process_single_pair(trial_id, imu_path, cv_path, out_dir):
     imu_df = pd.read_csv(imu_path)
     cv_df = pd.read_csv(cv_path)
 
-    # Normalize microsecond timestamps relative to trial start
-    t0_imu = imu_df["timestamp_unix_us"].iloc[0]
-    t0_cv = cv_df["timestamp_unix_us"].iloc[0]
+    start_gap = (cv_df["timestamp_unix_us"].iloc[0] - imu_df["timestamp_unix_us"].iloc[0]) / 1e6
+    if abs(start_gap) > 1.0:
+        raise ValueError(f"trial {trial_id}: IMU and CV files start {start_gap:.1f} s apart")
 
-    imu_df["time_sec"] = (imu_df["timestamp_unix_us"] - t0_imu) / 1e6
-    cv_df["time_sec"] = (cv_df["timestamp_unix_us"] - t0_cv) / 1e6
+    # common time base: laptop clock, zero at first IMU sample
+    t0 = imu_df["timestamp_unix_us"].iloc[0]
+    t = (imu_df["timestamp_unix_us"].values - t0) / 1e6
+    imu_df["time_sec"] = t
+    dt = np.diff(t)
+    fs = 1.0 / np.mean(dt)
 
-    dt = imu_df["time_sec"].diff().fillna(0.0).values
-    dt_avg = np.mean(dt[1:]) if len(dt) > 1 else 0.01
-    fs = 1.0 / dt_avg
+    # forward axis = logged accel_y (sensor x-axis after firmware remap)
+    b, a = butter(N=2, Wn=LPF_CUTOFF_HZ / (fs / 2.0), btype="low")
+    accel_lpf = filtfilt(b, a, imu_df["accel_y"].values)
 
-    # Physical constants and scaling parameters
-    cv_scale_factor = 1.20
-    cog_offset = np.array([-0.004, -0.0381, 0.00], dtype=np.float32)
+    stationary = t <= STATIONARY_SEC
+    bias = np.mean(accel_lpf[stationary])
+    accel_clean = accel_lpf - bias
 
-    # Map primary physical forward motion axis (accel_y)
-    raw_accel_forward = imu_df["accel_y"].values if "accel_y" in imu_df.columns else imu_df["accel_x"].values
+    # sign from acceleration at sustained motion onset
+    above = np.abs(accel_clean) > ONSET_ACC
+    run5 = np.convolve(above, np.ones(5, dtype=int), "valid") == 5
+    onset_idx = int(np.argmax(run5))
+    sign = 1.0 if accel_clean[onset_idx] >= 0 else -1.0
+    accel_clean *= sign
 
-    # Zero phase 10 Hz Butterworth low pass filter for IMU
-    cutoff_hz = 10.0
-    b, a = butter(N=2, Wn=cutoff_hz / (fs / 2.0), btype="low")
-    accel_lpf = filtfilt(b, a, raw_accel_forward)
-
-    # Initial static window bias calibration
-    stationary_sec = 1.5
-    stationary_mask = imu_df["time_sec"] <= stationary_sec
-
-    ax_bias = np.mean(accel_lpf[stationary_mask]) if np.any(stationary_mask) else 0.0
-    accel_clean = accel_lpf - ax_bias
-
-    # Double integration for dead-reckoning
-    vel_x = np.cumsum(accel_clean * dt)
-    vel_x[stationary_mask] = 0.0
-    pos_x = np.cumsum(vel_x * dt)
-
-    # Enforce positive displacement direction for forward motion
-    if pos_x[-1] < 0:
-        accel_clean = -accel_clean
-        vel_x = np.cumsum(accel_clean * dt)
-        vel_x[stationary_mask] = 0.0
-        pos_x = np.cumsum(vel_x * dt)
+    # trapezoidal integration; velocity clamped to zero during the stationary window
+    accel_int = np.where(stationary, 0.0, accel_clean)
+    vel = cumulative_trapezoid(accel_int, t, initial=0.0)
+    vel[stationary] = 0.0
+    pos = cumulative_trapezoid(vel, t, initial=0.0)
 
     imu_df["imu_accel_x_filt"] = accel_clean
-    imu_df["imu_vel_x"] = vel_x
-    imu_df["imu_pos_x"] = pos_x
+    imu_df["imu_vel_x"] = vel
+    imu_df["imu_pos_x"] = pos
 
-    # Centered rolling median filter to suppress camera tracking spikes
-    cv_x_series = pd.Series(cv_df["x_filt"].values)
-    win_size = min(15, len(cv_x_series) if len(cv_x_series) % 2 == 1 else len(cv_x_series) - 1)
-    if win_size < 3:
-        win_size = 3
-    cv_x_clean = cv_x_series.rolling(window=win_size, min_periods=1, center=True).median().values
+    # CV: Tag ID 0 only, EMA re-applied, centered rolling median, scale correction
+    n_other = int((cv_df["tag_id"] != 0).sum())
+    cv0 = cv_df[cv_df["tag_id"] == 0].reset_index(drop=True)
+    tc = (cv0["timestamp_unix_us"].values - t0) / 1e6
+    x_raw = cv0["x_raw"].values
+    ema = np.empty_like(x_raw)
+    ema[0] = x_raw[0]
+    for i in range(1, len(x_raw)):
+        ema[i] = ALPHA_POS * x_raw[i] + (1.0 - ALPHA_POS) * ema[i - 1]
+    x_med = pd.Series(ema).rolling(MEDIAN_WIN, center=True, min_periods=1).median().values
+    x_scaled = CV_SCALE * x_med
 
-    # Detect sustained physical motion onset
-    cv_base = np.median(cv_x_clean[:min(20, len(cv_x_clean))])
-    cv_diff = np.abs(cv_x_clean - cv_base)
-    cv_motion_bool = cv_diff > 0.08
+    cv_interp = np.interp(t, tc, x_scaled, left=x_scaled[0], right=x_scaled[-1])
+    cv_pos = cv_interp - np.mean(cv_interp[stationary])
+    if cv_pos[-1] < 0:          # camera x-axis points opposite to travel in some setups
+        cv_pos = -cv_pos
 
-    cv_motion_idx = None
-    window_len = 5
-    for i in range(len(cv_motion_bool) - window_len):
-        if np.all(cv_motion_bool[i : i + window_len]):
-            cv_motion_idx = i
-            break
+    # residual offset: cross-correlation of IMU and CV velocities within +/-0.5 s
+    cv_vel = np.gradient(cv_pos, t)
+    s1 = vel - vel.mean()
+    s2 = cv_vel - cv_vel.mean()
+    corr = correlate(s1, s2, mode="full")
+    lags = np.arange(-len(s1) + 1, len(s1))
+    win = np.abs(lags) <= int(MAX_LAG_SEC * fs)
+    best_lag = int(lags[win][np.argmax(corr[win])])
+    lag_sec = best_lag / fs   # negative = CV trace lags IMU
 
-    imu_dyn = np.abs(accel_clean)
-    imu_motion_bool = imu_dyn > 0.20
-    imu_motion_idx = None
-    for i in range(len(imu_motion_bool) - window_len):
-        if np.all(imu_motion_bool[i : i + window_len]):
-            imu_motion_idx = i
-            break
+    # remove the residual offset: shift the CV time base by the measured lag and re-zero
+    cv_interp = np.interp(t, tc + lag_sec, x_scaled, left=x_scaled[0], right=x_scaled[-1])
+    cv_pos = cv_interp - np.mean(cv_interp[stationary])
+    if cv_pos[-1] < 0:
+        cv_pos = -cv_pos
+    cv_vel2 = np.gradient(cv_pos, t)
+    c2 = correlate(s1, cv_vel2 - cv_vel2.mean(), mode="full")
+    residual_lag = int(lags[win][np.argmax(c2[win])]) / fs
 
-    if cv_motion_idx is not None and imu_motion_idx is not None:
-        cv_motion_t0 = cv_df["time_sec"].iloc[cv_motion_idx]
-        imu_motion_t0 = imu_df["time_sec"].iloc[imu_motion_idx]
-        cv_time_aligned = cv_df["time_sec"].values - cv_motion_t0 + imu_motion_t0
-    else:
-        cv_time_aligned = cv_df["time_sec"].values
+    # motion onset gap on the shared clock (CV first moves 1 cm vs IMU onset)
+    cv_dev = np.abs(x_scaled - np.median(x_scaled[:10]))
+    cv_run = np.convolve(cv_dev > 0.01, np.ones(5, dtype=int), "valid") == 5
+    cv_onset_t = tc[int(np.argmax(cv_run))]
+    onset_gap = cv_onset_t - t[onset_idx]
 
-    cv_x_scaled = (cv_x_clean * cv_scale_factor) + cog_offset[0]
+    imu_df["cv_pos_x_aligned"] = cv_pos
+    imu_df["position_error_m"] = np.abs(pos - cv_pos)
 
-    # Detect tail end of valid motion (before trailing tracking loss drops)
-    cv_end_val = np.median(cv_x_scaled[-15:])
-    if trial_id == "004":
-        # Target fix for Trial 004 trailing tracking drop
-        valid_tail_mask = cv_df["time_sec"] <= 5.25
-        if np.any(valid_tail_mask):
-            cv_end_val = (np.median(cv_x_clean[valid_tail_mask][-10:]) * cv_scale_factor) + cog_offset[0]
+    out_path = os.path.join(out_dir, f"research_telemetry_merged_{trial_id}.csv")
+    imu_df.to_csv(out_path, index=False)
 
-    cv_resampled = np.interp(
-        imu_df["time_sec"], 
-        cv_time_aligned, 
-        cv_x_scaled, 
-        left=cv_x_scaled[0], 
-        right=cv_end_val
-    )
+    # stop time from CV: last time CV differs from its final value by > 1 cm
+    moving = np.where(np.abs(cv_pos - cv_pos[-1]) > 0.01)[0]
+    t_stop = t[moving[-1]] if len(moving) else np.nan
+    rest = t > t_stop + 0.3
+    gyro = np.sqrt(imu_df["gyro_x"] ** 2 + imu_df["gyro_y"] ** 2 + imu_df["gyro_z"] ** 2)
 
-    # Enforce initial zero position baseline
-    cv_baseline = np.mean(cv_resampled[stationary_mask]) if np.any(stationary_mask) else cv_resampled[0]
-    cv_pos_zeroed = cv_resampled - cv_baseline
+    return {
+        "trial": trial_id, "imu_file": os.path.basename(imu_path), "cv_file": os.path.basename(cv_path),
+        "start_gap_s": start_gap, "fs_hz": fs, "median_dt_ms": np.median(dt) * 1e3, "max_dt_ms": dt.max() * 1e3,
+        "dup_rows_pct": 100 * (imu_df[["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]]
+                               .diff().abs().sum(axis=1) == 0).mean(),
+        "cv_rows_per_s": len(cv0) / (tc[-1] - tc[0]), "cv_other_tag_rows": n_other,
+        "bias_ms2": bias, "sign": sign, "imu_onset_s": t[onset_idx], "cv_onset_gap_s": onset_gap,
+        "vel_lag_s": lag_sec, "residual_lag_after_s": residual_lag, "t_stop_s": t_stop, "post_stop_s": t[-1] - t_stop,
+        "end_vel_ms": vel[-1], "rest_cv_sd_mm": 1e3 * np.std(cv_pos[rest]) if rest.sum() > 10 else np.nan,
+        "gyro_peak_rads": gyro.max(), "accel_clipped": bool((imu_df["accel_y"].abs() >= 39.19).any()),
+        "cv_final_m": cv_pos[-1], "imu_final_m": pos[-1],
+    }
 
-    # Enforce positive displacement direction
-    if cv_pos_zeroed[-1] < 0:
-        cv_pos_zeroed = -cv_pos_zeroed
 
-    # Cross-correlation lag estimation within constrained window
-    sig1 = imu_df["imu_pos_x"].values - np.mean(imu_df["imu_pos_x"].values)
-    sig2 = cv_pos_zeroed - np.mean(cv_pos_zeroed)
+def main():
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else "."
+    out_dir = sys.argv[2] if len(sys.argv) > 2 else "."
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for trial, (ik, ck) in PAIRS.items():
+        rows.append(process_single_pair(trial, os.path.join(data_dir, f"imu_run_{ik}.csv"),
+                                        os.path.join(data_dir, f"cv_data_{ck}.csv"), out_dir))
+    diag = pd.DataFrame(rows)
+    diag.to_csv(os.path.join(out_dir, "processing_diagnostics.csv"), index=False)
+    for k, why in EXCLUDED.items():
+        print(f"excluded trial {k}: {why}")
+    pd.set_option("display.width", 250)
+    print(diag.round(4).to_string(index=False))
 
-    corr = correlate(sig1, sig2, mode="full")
-    lags = np.arange(-len(sig1) + 1, len(sig1))
-
-    max_lag_samples = int(0.5 / dt_avg)
-    valid_mask = (lags >= -max_lag_samples) & (lags <= max_lag_samples)
-    valid_lags = lags[valid_mask]
-    valid_corr = corr[valid_mask]
-
-    best_lag = valid_lags[np.argmax(valid_corr)] if len(valid_corr) > 0 else 0
-    time_offset = best_lag * dt_avg
-
-    cv_aligned = shift_array(cv_pos_zeroed, best_lag)
-    cv_aligned = cv_aligned - cv_aligned[0]
-
-    # Override Trial 004 resting displacement if late optical tracking drop occurs
-    if trial_id == "004":
-        cv_aligned[-5:] = 0.74684
-
-    imu_df["cv_pos_x_aligned"] = cv_aligned
-    imu_df["position_error_m"] = np.abs(imu_df["imu_pos_x"] - imu_df["cv_pos_x_aligned"])
-
-    # Research paper error metrics
-    mae = np.mean(imu_df["position_error_m"])
-    rmse = np.sqrt(np.mean(imu_df["position_error_m"] ** 2))
-    max_error = imu_df["position_error_m"].max()
-    final_error = imu_df["position_error_m"].iloc[-1]
-
-    cv_final_pos = cv_aligned[-1]
-    imu_final_pos = imu_df["imu_pos_x"].iloc[-1]
-    pct_drift = (final_error / cv_final_pos) * 100.0 if cv_final_pos > 0 else 0.0
-
-    print(f"cv scale factor applied:         {cv_scale_factor:.3f}")
-    print(f"latency offset:                   {time_offset:.4f} s ({best_lag} samples)")
-    print(f"initial cv position:             {cv_aligned[0]:.4f} m")
-    print(f"final cv position:               {cv_final_pos:.4f} m")
-    print(f"initial imu position:            {imu_df['imu_pos_x'].iloc[0]:.4f} m")
-    print(f"final imu position:              {imu_final_pos:.4f} m")
-    print(f"final drift error:               {final_error:.4f} m ({pct_drift:.2f}%)")
-    print(f"mean absolute error (mae):       {mae:.4f} m")
-    print(f"root mean square error (rmse):   {rmse:.4f} m")
-    print(f"peak trajectory error:           {max_error:.4f} m")
-
-    imu_df.to_csv(output_path, index=False)
-    print(f"exported research dataset:       {output_path}")
-
-def process_and_merge():
-    if len(sys.argv) >= 3:
-        process_single_pair(sys.argv[1], sys.argv[2])
-    else:
-        imu_files = sorted(glob.glob("imu_run_*.csv"))
-        cv_files = sorted(glob.glob("cv_ground_truth_*.csv"))
-
-        if not imu_files or not cv_files:
-            print("error: no imu_run_*.csv or cv_ground_truth_*.csv files found in directory")
-            return
-
-        imu_map = {}
-        for f in imu_files:
-            m = re.search(r"(\d{3})", f)
-            if m:
-                imu_map[m.group(1)] = f
-
-        cv_map = {}
-        for f in cv_files:
-            m = re.search(r"(\d{3})", f)
-            if m:
-                cv_map[m.group(1)] = f
-
-        matched_keys = sorted(set(imu_map.keys()).intersection(set(cv_map.keys())))
-
-        if matched_keys:
-            print(f"found {len(matched_keys)} matched trial pairs in current folder")
-            for k in matched_keys:
-                process_single_pair(imu_map[k], cv_map[k])
-        else:
-            print(f"found {len(imu_files)} imu files and {len(cv_files)} cv files, processing in sorted order")
-            for imu_path, cv_path in zip(imu_files, cv_files):
-                process_single_pair(imu_path, cv_path)
 
 if __name__ == "__main__":
-    process_and_merge()
+    main()
