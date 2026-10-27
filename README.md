@@ -258,6 +258,12 @@ Based on what went wrong with the IMU, we think the most useful next steps are:
 2. **Extended Kalman Filter (EKF) sensor fusion:** use the fast 122 Hz IMU between video frames and let the 30 FPS camera correct the drift.
 3. **Multiple markers:** put several ArUco tags on the chassis to help when the marker looks small or is seen at a steep angle.
 
+## License
+
+The code in this repository (`Software/`) is released under the [MIT License](LICENSE).
+
+The data, figures, schematic, and documentation (`Data/`, `Hardware/`, and this README) are released under the [Creative Commons Attribution 4.0 International License](LICENSE-DATA) (CC BY 4.0). You are free to share and adapt them as long as you give appropriate credit.
+
 ## AI Use
 
 Claude Opus 5.5 (Anthropic) was used to write and debug the data processing and figure generation code and to check data integrity. Gemini 3.6 Thinking (Google) was used to help debug the data collection scripts and to write a script that generates figures from the merged data. The full disclosure is in the paper.
