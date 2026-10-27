@@ -17,7 +17,7 @@ Across 11 trials (12 recorded, 1 excluded for mismatched files) at target distan
 - CV error was lower than IMU error in **all 11 trials** (sign test, *p* ≈ 0.001; Wilcoxon signed-rank test, *p* ≈ 0.001).
 - While the car sat at rest, the CV position varied by only 0.03 to 1.5 mm (standard deviation).
 
-![CV position vs. IMU dead-reckoning across the three target distances](Data/Processed%20Data/Figures/figure2_trajectory_overlays.png)
+![CV position vs. IMU dead-reckoning across the three target distances](Data/Figures/figure2_trajectory_overlays.png)
 
 *CV position (blue) vs. IMU dead-reckoning (red) for Run 001 (0.75 m), Run 005 (1.00 m), and Run 009 (1.50 m). The CV curve flattens out when the car stops, while the IMU curve keeps going up or down.*
 
@@ -40,6 +40,7 @@ RC-Car-IMU-vs-CV-motion-tracker/
 ├── Data/
 │   ├── Raw Data/                  # imu_run_XXX.csv (ESP32) and cv_data_XXX.csv (laptop), runs 001–012
 │   └── Processed Data/            # merged trials, Tables 1–2, summary statistics, diagnostics, figures
+|   └── Figures                    # contains all generated figures based on trial data
 ├── Hardware/
 │   ├── Circuit Schematics/        # full circuit schematic (PDF, with and without drawing sheet)
 │   ├── Diagrams/
@@ -67,7 +68,7 @@ RC-Car-IMU-vs-CV-motion-tracker/
 
 The circuit was built on a perfboard. The LM2596 steps the battery down to 5 V for the ESP32's `VIN` pin and the microSD module, and the IMU runs off the ESP32's 3.3 V regulator. A 1N5822 diode and a 330 µF capacitor sit on the 5 V rail. The IMU's I2C lines each have a 2 kΩ pull-up resistor to 3.3 V, and a 0.1 µF capacitor decouples the IMU's power pin. The IMU's `SAO` pin is tied to 3.3 V, which sets its I2C address to `0x6B` (the firmware tries both `0x6A` and `0x6B`).
 
-![Circuit schematic](Hardware/Circuit%20Schematics/IMU_vs_CV_tracker_schematic.png)
+![Circuit schematic](Data/Figures/figure1_circuit_schematic.png)
 
 *Complete circuit schematic: power stage (left), ESP32 (center), LSM6DS3 IMU (top right), and SPI microSD card module (bottom right). PDF versions are in [`Hardware/Circuit Schematics`](Hardware/Circuit%20Schematics).*
 
@@ -229,13 +230,13 @@ CV deviation (CV Dev.) is how far the CV travel was from the taped target, as a 
 
 We also found that the IMU's final drift did not get bigger with longer distances (*r* = 0.088, *p* ≈ 0.80). It seemed to depend more on what happened when the car hit the end-stop.
 
-![IMU final drift error vs. target distance](Data/Processed%20Data/Figures/figure4_distance_error_scaling.png)
+![IMU final drift error vs. target distance](Data/Figures/figure4_distance_error_scaling.png)
 
 *IMU final drift error for each trial, with block means ± standard deviation and a linear fit (y = 0.088x + 0.394). The slope is not significant, so longer runs did not reliably produce more drift.*
 
 The drift instead came from two different failure modes. In seven trials, the calculated velocity was still positive after the car stopped, so the IMU position kept curving upward. In the other four, the impact left the velocity negative, so the position drifted backward.
 
-![Kinematic profile for Run 005](Data/Processed%20Data/Figures/figure3_kinematic_profiles.png)
+![Kinematic profile for Run 005](Data/Figures/figure3_kinematic_profiles.png)
 
 *Run 005: filtered acceleration (top), integrated IMU velocity (middle), and IMU vs. CV position (bottom). The velocity never returns to zero after the car stops, which is what causes the drift.*
 
